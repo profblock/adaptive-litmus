@@ -623,6 +623,100 @@ static void acedf_task_exit(struct task_struct * t)
         TRACE_TASK(t, "RIP\n");
 }
 
+static long acedf_task_change_params(
+	struct task_struct *t,
+	struct rt_task *new_params)
+{
+
+	unsigned long flags;
+	int need_requeue = 0;
+
+	acedf_domain_t *new_cluster, *old_cluster;
+
+	/* This implementation only supports changing the cluster of the
+	 * task. We ignore all other task parameters. */
+
+	if (new_params->cpu >= NR_CPUS || !cpu_online(new_params->cpu)) {
+		printk("[%s/%d] change rejected: CPU %u is not online.\n",
+			t->comm, t->pid, new_params->cpu);
+		return -EINVAL;
+	}
+
+retry:
+	/* The cluster specified by the new task parameters.
+	 * Userspace simply sticks one of the cores belonging to the target
+	 * cluster into the new_params->cpu field.
+	 */
+	new_cluster = remote_cluster(new_params->cpu);
+
+	/* The cluster the task is currently executing in.
+	 * Note: the task may currently be executing on some CPU.
+	 */
+	old_cluster = lock_cluster_of_task_irqsave(t, flags);
+
+	TRACE_TASK(t, "moving from cluster %d to cluster %d (same:%d)\n",
+		old_cluster->id, new_cluster->id, new_cluster == old_cluster);
+
+	if (new_cluster == old_cluster) {
+		/* trivial case */
+		TRACE_TASK(t, "old cluster is the new cluster\n");
+		unlock_cluster_of_task_irqrestore(t, flags);
+		return 0;
+	} else if (new_cluster < old_cluster) {
+		/* always lock cluster at lower address first */
+		TRACE_TASK(t, "must drop lock to double-lock...\n");
+
+		/* unlock, then re-lock */
+		raw_spin_unlock(&old_cluster->cluster_lock);
+		raw_spin_lock(&new_cluster->cluster_lock);
+		raw_spin_lock_nested(&old_cluster->cluster_lock, 1);
+
+		/* verify that task hasn't moved */
+		if (task_cpu_cluster(t) != old_cluster) {
+			/* uh, oh, retry */
+			TRACE_TASK(t, "migration race\n");
+			raw_spin_unlock(&new_cluster->cluster_lock);
+			raw_spin_unlock_irqrestore(&old_cluster->cluster_lock, flags);
+			goto retry;
+		}
+
+	} else {
+		/* can proceed directly, right lock order */
+		raw_spin_lock_nested(&new_cluster->cluster_lock, 1);
+	}
+
+	/* Ok, remove it from the source cluster data structures. */
+	TRACE_TASK(t, "removing from cluster %d's data structures\n",
+		old_cluster->id);
+	need_requeue = is_queued(t) || tsk_rt(t)->linked_on != NO_CPU;
+	unlink(t);
+	if (tsk_rt(t)->scheduled_on != NO_CPU) {
+		cpu_entry_t *cpu;
+		TRACE_TASK(t, "scheduled_on=%d\n", tsk_rt(t)->scheduled_on);
+		cpu = &per_cpu(acedf_cpu_entries, tsk_rt(t)->scheduled_on);
+		preempt(cpu);
+		cpu->scheduled = NULL;
+		tsk_rt(t)->scheduled_on = NO_CPU;
+	}
+
+	/* Next, update assignment. */
+	tsk_rt(t)->task_params.cpu = new_params->cpu;
+
+	raw_spin_unlock(&old_cluster->cluster_lock);
+
+	/* Finally, if this task is running, we need to treat it like a new
+	 * job arrival. */
+	 if (need_requeue) {
+		TRACE_TASK(t, "requeue needed\n");
+		acedf_job_arrival(t);
+	 }
+
+	unlock_cluster_of_task_irqrestore(t, flags);
+
+	return 0;
+}
+
+
 static long acedf_admit_task(struct task_struct* tsk)
 {
 	return (remote_cluster(task_cpu(tsk)) == task_cpu_cluster(tsk)) ?
@@ -854,6 +948,7 @@ static struct sched_plugin acedf_plugin __cacheline_aligned_in_smp = {
 	.activate_plugin	= acedf_activate_plugin,
 	.deactivate_plugin	= acedf_deactivate_plugin,
 	.get_domain_proc_info	= acedf_get_domain_proc_info,
+	.task_change_params	= acedf_task_change_params,
 };
 
 static struct proc_dir_entry *cluster_file = NULL, *acedf_dir = NULL;

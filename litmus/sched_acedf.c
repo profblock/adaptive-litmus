@@ -92,6 +92,8 @@ typedef struct clusterdomain {
 	/* the cpus queue themselves according to priority in here */
 	struct bheap_node *heap_node;
 	struct bheap      cpu_heap;
+	/* numeric ID, for debugging purposes */
+	int		id;
 	/* lock for this cluster */
 #define cluster_lock domain.ready_lock
 } acedf_domain_t;
@@ -771,6 +773,8 @@ static long acedf_activate_plugin(void)
 				GFP_ATOMIC);
 		bheap_init(&(acedf[i].cpu_heap));
 		edf_domain_init(&(acedf[i].domain), NULL, acedf_release_jobs);
+
+		acedf[i].id = i;
 
 		if(!zalloc_cpumask_var(&acedf[i].cpu_map, GFP_ATOMIC))
 			return -ENOMEM;

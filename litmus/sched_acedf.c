@@ -266,22 +266,14 @@ static void preempt(cpu_entry_t *entry)
 	preempt_if_preemptable(entry->scheduled, entry->cpu);
 }
 
-/* requeue - Put an unlinked task into gsn-edf domain.
- *           Caller must hold acedf_lock.
- */
-static noinline void requeue(struct task_struct* task)
+static void requeue(struct task_struct* task)
 {
 	acedf_domain_t *cluster = task_cpu_cluster(task);
 	BUG_ON(!task);
 	/* sanity check before insertion */
 	BUG_ON(is_queued(task));
 
-	if (is_early_releasing(task) || is_released(task, litmus_clock()))
-		__add_ready(&cluster->domain, task);
-	else {
-		/* it has got to wait */
-		add_release(&cluster->domain, task);
-	}
+	__add_ready(&cluster->domain, task);
 }
 
 #ifdef CONFIG_SCHED_CPU_AFFINITY
@@ -397,8 +389,7 @@ static noinline void current_job_completion(int forced)
 	tsk_rt(t)->completed = 0;
 	/* prepare for next period */
 	prepare_for_next_period(t);
-	if (is_early_releasing(t) || is_released(t, litmus_clock()))
-		sched_trace_task_release(t);
+	sched_trace_task_release(t);
 	/* unlink */
 	unlink(t);
 	/* requeue

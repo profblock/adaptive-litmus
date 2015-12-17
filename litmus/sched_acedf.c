@@ -104,6 +104,34 @@ acedf_domain_t *acedf;
 #define remote_cluster(cpu)	((acedf_domain_t *) per_cpu(acedf_cpu_entries, cpu).cluster)
 #define task_cpu_cluster(task)	remote_cluster(get_partition(task))
 
+static acedf_domain_t* lock_cluster_of_task(struct task_struct* t)
+{
+	acedf_domain_t *dom;
+
+	while (1) {
+		dom = task_cpu_cluster(t);
+		raw_spin_lock(&dom->cluster_lock);
+		if (task_cpu_cluster(t) == dom)
+			break;
+		/* migrated... */
+		raw_spin_unlock(&dom->cluster_lock);
+		TRACE_TASK(t, "migration vs. cluster lock race\n");
+	}
+
+	return dom;
+}
+
+static void unlock_cluster_of_task(struct task_struct *t)
+{
+	raw_spin_unlock(&task_cpu_cluster(t)->cluster_lock);
+}
+
+#define lock_cluster_of_task_irqsave(t, flags) \
+	({local_irq_save(flags); lock_cluster_of_task(t);})
+
+#define unlock_cluster_of_task_irqrestore(t, flags) \
+	do {unlock_cluster_of_task(t); local_irq_restore(flags);} while (0)
+
 /* Uncomment WANT_ALL_SCHED_EVENTS if you want to see all scheduling
  * decisions in the TRACE() log; uncomment VERBOSE_INIT for verbose
  * information during the initialization of the plugin (e.g., topology)
@@ -535,12 +563,9 @@ static void acedf_task_new(struct task_struct * t, int on_rq, int is_scheduled)
 	cpu_entry_t* 		entry;
 	acedf_domain_t*		cluster;
 
-	TRACE("gsn edf: task new %d\n", t->pid);
+	TRACE("A-CEDF: task new %d\n", t->pid);
 
-	/* the cluster doesn't change even if t is scheduled */
-	cluster = task_cpu_cluster(t);
-
-	raw_spin_lock_irqsave(&cluster->cluster_lock, flags);
+	cluster = lock_cluster_of_task_irqsave(t, flags);
 
 	/* setup job params */
 	release_at(t, litmus_clock());
@@ -568,7 +593,7 @@ static void acedf_task_new(struct task_struct * t, int on_rq, int is_scheduled)
 
 	if (on_rq || is_scheduled)
 		acedf_job_arrival(t);
-	raw_spin_unlock_irqrestore(&(cluster->cluster_lock), flags);
+	unlock_cluster_of_task_irqrestore(t, flags);
 }
 
 static void acedf_task_wake_up(struct task_struct *task)
@@ -579,9 +604,7 @@ static void acedf_task_wake_up(struct task_struct *task)
 
 	TRACE_TASK(task, "wake_up at %llu\n", litmus_clock());
 
-	cluster = task_cpu_cluster(task);
-
-	raw_spin_lock_irqsave(&cluster->cluster_lock, flags);
+	cluster = lock_cluster_of_task_irqsave(task, flags);
 	now = litmus_clock();
 	if (is_sporadic(task) && is_tardy(task, now)) {
 		/* new sporadic release */
@@ -589,7 +612,7 @@ static void acedf_task_wake_up(struct task_struct *task)
 		sched_trace_task_release(task);
 	}
 	acedf_job_arrival(task);
-	raw_spin_unlock_irqrestore(&cluster->cluster_lock, flags);
+	unlock_cluster_of_task_irqrestore(task, flags);
 }
 
 static void acedf_task_block(struct task_struct *t)
@@ -599,24 +622,21 @@ static void acedf_task_block(struct task_struct *t)
 
 	TRACE_TASK(t, "block at %llu\n", litmus_clock());
 
-	cluster = task_cpu_cluster(t);
-
 	/* unlink if necessary */
-	raw_spin_lock_irqsave(&cluster->cluster_lock, flags);
+	cluster = lock_cluster_of_task_irqsave(t, flags);
 	unlink(t);
-	raw_spin_unlock_irqrestore(&cluster->cluster_lock, flags);
+	unlock_cluster_of_task_irqrestore(t, flags);
 
 	BUG_ON(!is_realtime(t));
 }
 
-
 static void acedf_task_exit(struct task_struct * t)
 {
 	unsigned long flags;
-	acedf_domain_t *cluster = task_cpu_cluster(t);
+	acedf_domain_t *cluster;
 
 	/* unlink if necessary */
-	raw_spin_lock_irqsave(&cluster->cluster_lock, flags);
+	cluster = lock_cluster_of_task_irqsave(t, flags);
 	unlink(t);
 	if (tsk_rt(t)->scheduled_on != NO_CPU) {
 		cpu_entry_t *cpu;
@@ -624,7 +644,7 @@ static void acedf_task_exit(struct task_struct * t)
 		cpu->scheduled = NULL;
 		tsk_rt(t)->scheduled_on = NO_CPU;
 	}
-	raw_spin_unlock_irqrestore(&cluster->cluster_lock, flags);
+	unlock_cluster_of_task_irqrestore(t, flags);
 
 	BUG_ON(!is_realtime(t));
         TRACE_TASK(t, "RIP\n");

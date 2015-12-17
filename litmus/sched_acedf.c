@@ -325,6 +325,7 @@ static void check_for_preemptions(acedf_domain_t *cluster)
 #ifdef CONFIG_RELEASE_MASTER
 	    && likely(local->cpu != cluster->domain.release_master)
 #endif
+	    && likely(local->cluster == task_cpu_cluster(task))
 		) {
 		task = __take_ready(&cluster->domain);
 		TRACE_TASK(task, "linking to local CPU %d to avoid IPI\n", local->cpu);
@@ -449,7 +450,6 @@ static struct task_struct* acedf_schedule(struct task_struct * prev)
 	/* sanity checking */
 	BUG_ON(entry->scheduled && entry->scheduled != prev);
 	BUG_ON(entry->scheduled && !is_realtime(prev));
-	BUG_ON(is_realtime(prev) && !entry->scheduled);
 
 	/* (0) Determine state */
 	exists      = entry->scheduled != NULL;

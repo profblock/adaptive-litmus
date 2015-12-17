@@ -3,26 +3,10 @@
  *
  * Implementation of the AC-EDF scheduling algorithm.
  *
- * This implementation is based on G-EDF:
- * - CPUs are clustered around L2 or L3 caches.
- * - Clusters topology is automatically detected (this is arch dependent
- *   and is working only on x86 at the moment --- and only with modern
- *   cpus that exports cpuid4 information)
- * - The plugins _does not_ attempt to put tasks in the right cluster i.e.
- *   the programmer needs to be aware of the topology to place tasks
- *   in the desired cluster
- * - default clustering is around L2 cache (cache index = 2)
- *   supported clusters are: L1 (private cache: pedf), L2, L3, ALL (all
- *   online_cpus are placed in a single cluster).
+ * Main difference to regular C-EDF: tasks may be moved between clusters.
  *
- *   For details on functions, take a look at sched_gsn_edf.c
- *
- * Currently, we do not support changes in the number of online cpus.
- * If the num_online_cpus() dynamically changes, the plugin is broken.
- *
- * This version uses the simple approach and serializes all scheduling
- * decisions by the use of a queue lock. This is probably not the
- * best way to do it, but it should suffice for now.
+ * Note: current version only implements early-releasing. Hard reservations
+ *       are not enforced.
  */
 
 #include <linux/spinlock.h>
@@ -70,7 +54,6 @@ typedef struct  {
 	struct clusterdomain*	cluster;	/* owning cluster */
 	struct task_struct*	linked;		/* only RT tasks */
 	struct task_struct*	scheduled;	/* only RT tasks */
-	atomic_t		will_schedule;	/* prevent unneeded IPIs */
 	struct bheap_node*	hn;
 } cpu_entry_t;
 
@@ -178,8 +161,7 @@ static cpu_entry_t* lowest_prio_cpu(acedf_domain_t *cluster)
  *                    Handles the case where the to-be-linked task is already
  *                    scheduled on a different CPU.
  */
-static noinline void link_task_to_cpu(struct task_struct* linked,
-				      cpu_entry_t *entry)
+static void link_task_to_cpu(struct task_struct* linked, cpu_entry_t *entry)
 {
 	cpu_entry_t *sched;
 	struct task_struct* tmp;
@@ -377,7 +359,7 @@ static void acedf_release_jobs(rt_domain_t* rt, struct bheap* tasks)
 }
 
 /* caller holds acedf_lock */
-static noinline void current_job_completion(int forced)
+static void current_job_completion(int forced)
 {
 	struct task_struct *t = current;
 
@@ -824,7 +806,6 @@ static long acedf_activate_plugin(void)
 
 				entry = &per_cpu(acedf_cpu_entries, ccpu);
 				acedf[i].cpus[cpu_count] = entry;
-				atomic_set(&entry->will_schedule, 0);
 				entry->cpu = ccpu;
 				entry->cluster = &acedf[i];
 				entry->hn = &(acedf[i].heap_node[cpu_count]);
